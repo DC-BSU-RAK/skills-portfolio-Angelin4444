@@ -52,7 +52,7 @@ def apply_hover_effects(button, default_bg, hover_bg='#ffb347'):
     button.bind("<Enter>", on_enter)
     button.bind("<Leave>", on_leave)
 
-# --- 1. JOKE LOGIC CLASS (OOP Core / File Handling) ---
+# --- 1. JOKE LOGIC CLASS  ---
 
 class JokeSource:
     """Handles loading, storing, and selecting jokes from the text file."""
@@ -89,8 +89,8 @@ class JokeSource:
 class SpeechManager:
     """Manages playing sounds (laugh) and generating/playing TTS audio."""
     def __init__(self):
-        # We will use the main mixer stream only for the local pyttsx3 engine.
-        pygame.mixer.init(frequency=22050, size=-16, channels=2, buffer=512) 
+        # Initializing mixer, but ONLY for SFX and TTS now
+        pygame.mixer.init(frequency=44100, size=-16, channels=2, buffer=1024) 
         self.engine = self._init_pyttsx3()
         self.tts_thread = None 
 
@@ -110,7 +110,7 @@ class SpeechManager:
                 tts = gTTS(text=text, lang='en')
                 tts.save(ASSETS["tts_temp_file"])
                 
-                # --- CRITICAL FIX 1: Play MP3 via Sound object, not music.load ---
+                # --- Play MP3 via Sound object ---
                 self.play_short_sfx(ASSETS["tts_temp_file"])
                 return
             
@@ -119,7 +119,7 @@ class SpeechManager:
 
         # Pyttsx3 Fallback (Local, Offline)
         if self.engine:
-            self.stop_audio() 
+            self.stop_tts()
             self.engine.say(text)
             self.engine.runAndWait() 
         else:
@@ -127,38 +127,40 @@ class SpeechManager:
 
     def generate_and_play_tts(self, text):
         """Starts the TTS process in a new thread."""
-        self.stop_audio() 
-        self.tts_thread = threading.Thread(target=self._tts_worker, args=(text, False))
+        self.stop_tts() # Stop any preceding TTS thread
+
+        self.tts_thread = threading.Thread(target=self._tts_worker, args=(text, False), daemon=True)
         self.tts_thread.start()
 
     def play_short_sfx(self, file_path):
-        """CRITICAL FIX: Plays a short sound file using pygame.mixer.Sound."""
-        self.stop_audio()
-        time.sleep(0.05) # Tiny delay to ensure mixer stream is free
-        
+        """Plays short sound via a Sound object."""
+        time.sleep(0.05) 
+            
         try:
-            # We use Sound object, which is better for short, non-interrupting playback
             sound_obj = pygame.mixer.Sound(file_path)
-            sound_obj.play()
+            channel = pygame.mixer.find_channel(True) 
+            channel.play(sound_obj)
         except pygame.error as e:
             print(f"SFX Playback Error: {e}")
 
-
     def play_laugh_sfx(self):
         """Plays the separate laughter sound effect using Sound."""
+        # No need to pause/unpause music
         self.play_short_sfx(ASSETS["laugh_sound"])
 
-    def stop_audio(self):
-        """Stops any currently playing audio."""
-        # Stop all channels to clear any lingering sound objects
-        pygame.mixer.stop()
-        
-        # Stop pyttsx3 if it's currently speaking
+    def stop_tts(self):
+        """Stops pyttsx3 engine and cleans up threads."""
         if self.engine and self.engine._inLoop:
             self.engine.stop()
-            
+        if self.tts_thread and self.tts_thread.is_alive():
+             pass
+             
+    def stop_audio(self):
+        """Stops all audio streams."""
+        pygame.mixer.stop() # Stops SFX/TTS
+        self.stop_tts()
+        
     def cleanup(self):
-        """Stops audio and deletes the temporary TTS file."""
         self.stop_audio()
         
         try:
@@ -198,11 +200,11 @@ class JokeController(tk.Tk):
             self.frames[frame_name] = frame
             frame.grid(row=0, column=0, sticky="nsew")
 
-        self.show_frame("MenuFrame")
+        self.show_frame("MenuFrame") 
 
     def show_frame(self, frame_name):
         """Raises the selected frame to the top."""
-        self.speech_manager.stop_audio() 
+        self.speech_manager.stop_tts() # Stop speaking if switching pages
         frame = self.frames[frame_name]
         frame.tkraise()
 
@@ -292,12 +294,13 @@ class JokeFrame(tk.Frame):
         """Hide elements while switching views."""
         self.punchline_button.place_forget()
         self.next_button.place_forget()
-        self.controller.speech_manager.stop_audio()
+        self.controller.speech_manager.stop_tts() # Stop TTS speaking
 
     def next_joke(self):
         """Show setup and speak it."""
         self._hide_all_states()
         self.current_joke = self.controller.joke_source.get_random_joke()
+        # Removed: pygame.mixer.music.unpause()
 
         if self.current_joke is None:
             self.joke_text_label.config(
@@ -319,36 +322,42 @@ class JokeFrame(tk.Frame):
     def show_punchline(self):
         """Show punchline, wait for TTS to finish, then play laugh."""
 
-        # FIX: Do NOT stop audio here.
+        # Hide buttons
         self.punchline_button.place_forget()
         self.next_button.place_forget()
 
         if self.current_joke is None:
-         return
+            return
 
         setup, punchline = self.current_joke
 
         # Display punchline
         self.joke_text_label.config(
-        text=f"ANSWER:\n\n{punchline}",
-        fg='white',
-        bg=self.JOKE_BG_COLOR
+            text=f"ANSWER:\n\n{punchline}",
+            fg='white',
+            bg=self.JOKE_BG_COLOR
         )
 
-        # Speak punchline
+        # Speak punchline (starts thread)
         self.controller.speech_manager.generate_and_play_tts(punchline)
 
-        # Wait for TTS → then laugh
+        # Wait for TTS to finish speaking in the background thread (The Pyttsx3/gTTS sync issue)
         def wait_and_laugh():
-         t = self.controller.speech_manager.tts_thread
-         if t:
-            t.join()
-         self.controller.speech_manager.play_laugh_sfx()
+            # Wait for the TTS thread to die (i.e., finish speaking/playing)
+            self.controller.speech_manager.tts_thread.join()
+            
+            # Once speaking is done, play the laugh SFX
+            self.controller.speech_manager.play_laugh_sfx()
+            
+            #  delay slightly before thread finishes
+            time.sleep(1.5) 
+
 
         threading.Thread(target=wait_and_laugh, daemon=True).start()
 
         # Show Next Button
         self.next_button.place(relx=0.5, rely=0.60, anchor=tk.CENTER)
+
 
 if __name__ == '__main__':
     app = JokeController()
